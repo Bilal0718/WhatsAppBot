@@ -18,7 +18,7 @@ if not os.path.exists(CONVERSATIONS_DIR):
     os.makedirs(CONVERSATIONS_DIR)
     logging.info(f"Created conversations directory at {CONVERSATIONS_DIR}")
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_API_KEY = "AIzaSyDCqPLwRmuIa7MYaFnqlC4EoJI2IaVMBNs"
 WASENDER_API_TOKEN = os.getenv('WASENDER_API_TOKEN')
 WASENDER_API_URL = "https://wasenderapi.com/api/send-message"
 
