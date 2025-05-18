@@ -123,7 +123,7 @@ def save_conversation_history(user_id, history):
             json.dump(history, f, indent=2)
     except Exception as e:
         logging.error(f"Error saving conversation history to {file_path}: {e}")
-def split_message(text, max_lines=3, max_chars_per_line=100):
+def split_message(text, max_lines=8, max_chars_per_line=100):
     """Split a long message into smaller chunks for better WhatsApp readability."""
     # First split by existing newlines
     paragraphs = text.split('\\n')
