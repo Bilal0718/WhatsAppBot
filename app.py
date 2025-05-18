@@ -275,86 +275,58 @@ def send_whatsapp_message(recipient_number, message_content, message_type='text'
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handles incoming WhatsApp messages via webhook."""
+    """Handles incoming WhatsApp messages via webhook from WaSenderAPI."""
     data = request.json
-    logging.info(f"Received webhook data (first 200 chars): {str(data)[:200]}")
+    logging.info(f"Received webhook data (first 300 chars): {json.dumps(data)[:300]}")
 
     try:
+        # Check if it's a new message event
         if data.get('event') == 'messages.upsert' and data.get('data') and data['data'].get('messages'):
-            message_info = data['data']['messages']
-            
-            # Check if it's a message sent by the bot itself
-            if message_info.get('key', {}).get('fromMe'):
-                logging.info(f"Ignoring self-sent message: {message_info.get('key', {}).get('id')}")
-                return jsonify({'status': 'success', 'message': 'Self-sent message ignored'}), 200
+            message = data['data']['messages']
+            sender_id = message.get('key', {}).get('remoteJid')  # WhatsApp ID e.g., 923001234567@s.whatsapp.net
+            from_me = message.get('key', {}).get('fromMe', False)
+            message_type = message.get('message', {}).get('conversation') or \
+                           message.get('message', {}).get('extendedTextMessage', {}).get('text')
 
-            sender_number = message_info.get('key', {}).get('remoteJid')
-            
-            incoming_message_text = None
-            message_type = 'unknown'
+            if from_me:
+                logging.info(f"Ignoring message sent by bot (fromMe=True). ID: {message.get('key', {}).get('id')}")
+                return jsonify({'status': 'ignored', 'reason': 'self-sent message'}), 200
 
-            # Extract message content based on message structure
-            if message_info.get('message'):
-                msg_content_obj = message_info['message']
-                if 'conversation' in msg_content_obj:
-                    incoming_message_text = msg_content_obj['conversation']
-                    message_type = 'text'
-                elif 'extendedTextMessage' in msg_content_obj and 'text' in msg_content_obj['extendedTextMessage']:
-                    incoming_message_text = msg_content_obj['extendedTextMessage']['text']
-                    message_type = 'text'
+            if not sender_id or not message_type:
+                logging.warning("Missing sender ID or message text.")
+                return jsonify({'status': 'error', 'reason': 'Invalid message format'}), 400
 
-            if message_info.get('messageStubType'):
-                stub_params = message_info.get('messageStubParameters', [])
-                logging.info(f"Received system message of type {message_info['messageStubType']} from {sender_number}. Stub params: {stub_params}")
-                return jsonify({'status': 'success', 'message': 'System message processed'}), 200
+            # Load conversation history
+            user_id = sender_id.split('@')[0]
+            conversation_history = load_conversation_history(user_id)
 
-            if not sender_number:
-                logging.warning("Webhook received message without sender information.")
-                return jsonify({'status': 'error', 'message': 'Incomplete sender data'}), 400
+            # Append user's message
+            conversation_history.append({'role': 'user', 'parts': [message_type]})
 
-            # Sanitize sender_number to use as a filename
-            safe_sender_id = "".join(c if c.isalnum() else '_' for c in sender_number)
+            # Get Gemini response
+            gemini_reply = get_gemini_response(message_type, conversation_history)
 
-            if message_type == 'text' and incoming_message_text:
-                logging.info(f"Processing text message from {sender_number} ({safe_sender_id}): {incoming_message_text}")
-                
-                # Load conversation history
-                conversation_history = load_conversation_history(safe_sender_id)
-                
-                # Get Gemini's reply, passing the history
-                gemini_reply = get_gemini_response(incoming_message_text, conversation_history)
-                
-                if gemini_reply:
-                    # Split the response into chunks and send them sequentially
-                    message_chunks = split_message(gemini_reply)
-                    for chunk in message_chunks:
-                        if not send_whatsapp_message(sender_number, chunk, message_type='text'):
-                            logging.error(f"Failed to send message chunk to {sender_number}")
-                            break
-                        # Delay between messages
-                        import random
-                        import time
-                        if i < len(message_chunks) - 1:
-                            delay = random.uniform(0.55, 1.5)
-                            time.sleep(delay)
-                    # Save the new exchange to history
-                    # Ensure history format is compatible with genai: list of {'role': 'user'/'model', 'parts': ['text']}
-                    conversation_history.append({'role': 'user', 'parts': [incoming_message_text]})
-                    conversation_history.append({'role': 'model', 'parts': [gemini_reply]})
-                    save_conversation_history(safe_sender_id, conversation_history)
-            elif incoming_message_text:
-                logging.info(f"Received '{message_type}' message from {sender_number}. No text content. Full data: {message_info}")
-            elif message_type != 'unknown':
-                 logging.info(f"Received '{message_type}' message from {sender_number}. No text content. Full data: {message_info}")
-            else:
-                logging.warning(f"Received unhandled or incomplete message from {sender_number}. Data: {message_info}")
-        elif data.get('event'):
-            logging.info(f"Received event '{data.get('event')}' which is not 'messages.upsert'. Data: {str(data)[:200]}")
+            # Append Gemini's reply to history
+            conversation_history.append({'role': 'model', 'parts': [gemini_reply]})
 
-        return jsonify({'status': 'success'}), 200
+            # Save updated history
+            save_conversation_history(user_id, conversation_history)
+
+            # Send the response in chunks (for long replies)
+            chunks = split_message(gemini_reply)
+            for chunk in chunks:
+                send_whatsapp_message(sender_id, chunk)
+
+            return jsonify({'status': 'success', 'message': 'Response sent'}), 200
+
+        else:
+            logging.warning("Invalid or non-message webhook event received.")
+            return jsonify({'status': 'ignored', 'reason': 'Not a valid message event'}), 400
+
     except Exception as e:
-        logging.error(f"Error processing webhook: {e}")
-        return jsonify({'status': 'error', 'message': 'Internal server error'}), 500
+        logging.error(f"Error processing webhook: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Internal error in webhook processing'}), 500
+
 
 if __name__ == '__main__':
     # For development with webhook testing via ngrok
