@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import google.generativeai as genai
 import json
+import time
 
 load_dotenv()
 
@@ -275,58 +276,64 @@ def send_whatsapp_message(recipient_number, message_content, message_type='text'
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handles incoming WhatsApp messages via webhook from WaSenderAPI."""
+    """Handles incoming WhatsApp messages via webhook from WaSenderAPI (1 msg/min limit)."""
     data = request.json
     logging.info(f"Received webhook data (first 300 chars): {json.dumps(data)[:300]}")
 
     try:
-        # Check if it's a new message event
+        # Check for a valid message event
         if data.get('event') == 'messages.upsert' and data.get('data') and data['data'].get('messages'):
             message = data['data']['messages']
-            sender_id = message.get('key', {}).get('remoteJid')  # WhatsApp ID e.g., 923001234567@s.whatsapp.net
+            sender_id = message.get('key', {}).get('remoteJid')  # e.g., 923001234567@s.whatsapp.net
             from_me = message.get('key', {}).get('fromMe', False)
-            message_type = message.get('message', {}).get('conversation') or \
-                           message.get('message', {}).get('extendedTextMessage', {}).get('text')
+
+            # Get message text (either simple or extended message)
+            message_text = (
+                message.get('message', {}).get('conversation') or
+                message.get('message', {}).get('extendedTextMessage', {}).get('text')
+            )
 
             if from_me:
-                logging.info(f"Ignoring message sent by bot (fromMe=True). ID: {message.get('key', {}).get('id')}")
-                return jsonify({'status': 'ignored', 'reason': 'self-sent message'}), 200
+                logging.info("Ignoring bot's own message.")
+                return jsonify({'status': 'ignored', 'reason': 'fromMe=True'}), 200
 
-            if not sender_id or not message_type:
+            if not sender_id or not message_text:
                 logging.warning("Missing sender ID or message text.")
                 return jsonify({'status': 'error', 'reason': 'Invalid message format'}), 400
 
-            # Load conversation history
+            # Extract user ID and load conversation history
             user_id = sender_id.split('@')[0]
             conversation_history = load_conversation_history(user_id)
 
-            # Append user's message
-            conversation_history.append({'role': 'user', 'parts': [message_type]})
+            # Append user message to history
+            conversation_history.append({'role': 'user', 'parts': [message_text]})
 
-            # Get Gemini response
-            gemini_reply = get_gemini_response(message_type, conversation_history)
+            # Generate response from Gemini
+            gemini_reply = get_gemini_response(message_text, conversation_history)
 
-            # Append Gemini's reply to history
+            # Append bot response to history and save it
             conversation_history.append({'role': 'model', 'parts': [gemini_reply]})
-
-            # Save updated history
             save_conversation_history(user_id, conversation_history)
 
-            # Send the response in chunks (for long replies)
+            # Split long message into chunks
             chunks = split_message(gemini_reply)
-            for chunk in chunks:
+
+            # Send each chunk with a delay of 60 seconds
+            for i, chunk in enumerate(chunks):
+                if i > 0:
+                    logging.info("Sleeping for 60 seconds to respect 1 msg/min limit.")
+                    time.sleep(60)
                 send_whatsapp_message(sender_id, chunk)
 
-            return jsonify({'status': 'success', 'message': 'Response sent'}), 200
+            return jsonify({'status': 'success', 'message': 'Reply sent with delay'}), 200
 
         else:
-            logging.warning("Invalid or non-message webhook event received.")
-            return jsonify({'status': 'ignored', 'reason': 'Not a valid message event'}), 400
+            logging.warning("Invalid or non-message event received.")
+            return jsonify({'status': 'ignored', 'reason': 'Not a message event'}), 400
 
     except Exception as e:
-        logging.error(f"Error processing webhook: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': 'Internal error in webhook processing'}), 500
-
+        logging.error(f"Error in webhook: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Webhook internal error'}), 500
 
 if __name__ == '__main__':
     # For development with webhook testing via ngrok
